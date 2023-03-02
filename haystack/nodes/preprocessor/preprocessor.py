@@ -45,6 +45,7 @@ iso639_to_nltk = {
     "pl": "polish",
     "pt": "portuguese",
     "ml": "malayalam",
+    "cn": "chinese"
 }
 
 
@@ -728,6 +729,12 @@ class PreProcessor(BasePreProcessor):
             longest = ""
         return longest if longest.strip() else None
 
+    def _chinese_sent_tokenize(self, text) -> List[str]:
+        sentence_pattern = r'[^？！。；\n]+[？！。；\n]'
+        sentences = re.findall(sentence_pattern, text)
+        sentences = [sent.strip() for sent in sentences]
+        return sentences
+
     def _split_sentences(self, text: str) -> List[str]:
         """
         Tokenize text into sentences.
@@ -736,29 +743,32 @@ class PreProcessor(BasePreProcessor):
         """
         language_name = iso639_to_nltk.get(self.language)
 
-        sentence_tokenizer = self._load_sentence_tokenizer(language_name)
-        # The following adjustment of PunktSentenceTokenizer is inspired by:
-        # https://stackoverflow.com/questions/33139531/preserve-empty-lines-with-nltks-punkt-tokenizer
-        # It is needed for preserving whitespace while splitting text into sentences.
-        period_context_fmt = r"""
-            %(SentEndChars)s             # a potential sentence ending
-            \s*                          # match potential whitespace (is originally in lookahead assertion)
-            (?=(?P<after_tok>
-                %(NonWord)s              # either other punctuation
-                |
-                (?P<next_tok>\S+)        # or some other token - original version: \s+(?P<next_tok>\S+)
-            ))"""
-        re_period_context = re.compile(
-            period_context_fmt
-            % {
-                "NonWord": sentence_tokenizer._lang_vars._re_non_word_chars,
-                "SentEndChars": sentence_tokenizer._lang_vars._re_sent_end_chars,
-            },
-            re.UNICODE | re.VERBOSE,
-        )
-        sentence_tokenizer._lang_vars._re_period_context = re_period_context
+        if language_name == "chinese":
+            sentences = self._chinese_sent_tokenize(text)
+        else:
+            sentence_tokenizer = self._load_sentence_tokenizer(language_name)
+            # The following adjustment of PunktSentenceTokenizer is inspired by:
+            # https://stackoverflow.com/questions/33139531/preserve-empty-lines-with-nltks-punkt-tokenizer
+            # It is needed for preserving whitespace while splitting text into sentences.
+            period_context_fmt = r"""
+                %(SentEndChars)s             # a potential sentence ending
+                \s*                          # match potential whitespace (is originally in lookahead assertion)
+                (?=(?P<after_tok>
+                    %(NonWord)s              # either other punctuation
+                    |
+                    (?P<next_tok>\S+)        # or some other token - original version: \s+(?P<next_tok>\S+)
+                ))"""
+            re_period_context = re.compile(
+                period_context_fmt
+                % {
+                    "NonWord": sentence_tokenizer._lang_vars._re_non_word_chars,
+                    "SentEndChars": sentence_tokenizer._lang_vars._re_sent_end_chars,
+                },
+                re.UNICODE | re.VERBOSE,
+            )
+            sentence_tokenizer._lang_vars._re_period_context = re_period_context
+            sentences = sentence_tokenizer.tokenize(text)
 
-        sentences = sentence_tokenizer.tokenize(text)
         return sentences
 
     def _load_sentence_tokenizer(self, language_name: Optional[str]) -> nltk.tokenize.punkt.PunktSentenceTokenizer:

@@ -9,7 +9,8 @@ except (ModuleNotFoundError, ImportError):
     # Python <= 3.7
     import importlib_metadata as metadata  # type: ignore
 
-__version__: str = str(metadata.version("farm-haystack"))
+# __version__: str = str(metadata.version("farm-haystack"))
+__version__: str = "shumybest-haystack-dev"
 
 
 # Logging is not configured here on purpose, see https://github.com/deepset-ai/haystack/issues/2485
