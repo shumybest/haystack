@@ -730,7 +730,7 @@ class PreProcessor(BasePreProcessor):
         return longest if longest.strip() else None
 
     def _chinese_sent_tokenize(self, text) -> List[str]:
-        sentence_pattern = r'[^？！。；\n]+[？！。；\n]'
+        sentence_pattern = r'[^？！。；]+[？！。；]'
         sentences = re.findall(sentence_pattern, text)
         sentences = [sent.strip() for sent in sentences]
         return sentences
