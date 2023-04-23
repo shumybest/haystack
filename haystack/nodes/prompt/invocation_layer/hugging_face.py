@@ -2,7 +2,14 @@ from typing import Optional, Union, List, Dict
 import logging
 
 import torch
-from transformers import pipeline, StoppingCriteriaList, StoppingCriteria, PreTrainedTokenizer, PreTrainedTokenizerFast
+from transformers import (
+    pipeline,
+    StoppingCriteriaList,
+    StoppingCriteria,
+    PreTrainedTokenizer,
+    PreTrainedTokenizerFast,
+    GenerationConfig,
+)
 from transformers.pipelines import get_task
 
 from haystack.modeling.utils import initialize_device_settings
@@ -23,7 +30,7 @@ class HFLocalInvocationLayer(PromptModelInvocationLayer):
     def __init__(
         self,
         model_name_or_path: str = "google/flan-t5-base",
-        max_length: Optional[int] = 100,
+        max_length: int = 100,
         use_auth_token: Optional[Union[str, bool]] = None,
         use_gpu: Optional[bool] = True,
         devices: Optional[List[Union[str, torch.device]]] = None,
@@ -33,7 +40,7 @@ class HFLocalInvocationLayer(PromptModelInvocationLayer):
         Creates an instance of HFLocalInvocationLayer used to invoke local Hugging Face models.
 
         :param model_name_or_path: The name or path of the underlying model.
-        :param max_length: The maximum length of the output text.
+        :param max_length: The maximum number of tokens the output text can have.
         :param use_auth_token: The token to use as HTTP bearer authorization for remote files.
         :param use_gpu: Whether to use GPU for inference.
         :param device: The device to use for inference.
@@ -41,8 +48,16 @@ class HFLocalInvocationLayer(PromptModelInvocationLayer):
         all PromptModelInvocationLayer instances, this instance of HFLocalInvocationLayer might receive some unrelated
         kwargs. Only kwargs relevant to the HFLocalInvocationLayer are considered. The list of supported kwargs
         includes: trust_remote_code, revision, feature_extractor, tokenizer, config, use_fast, torch_dtype, device_map.
-        For more details about these kwargs, see
+        For more details about pipeline kwargs in general, see
         Hugging Face [documentation](https://huggingface.co/docs/transformers/en/main_classes/pipelines#transformers.pipeline).
+
+        This layer supports two additional kwargs: generation_kwargs and model_max_length.
+
+        The generation_kwargs are used to customize text generation for the underlying pipeline. See Hugging
+        Face [docs](https://huggingface.co/docs/transformers/main/en/generation_strategies#customize-text-generation)
+        for more details.
+
+        The model_max_length is used to specify the custom sequence length for the underlying pipeline.
         """
         super().__init__(model_name_or_path)
         self.use_auth_token = use_auth_token
@@ -71,6 +86,8 @@ class HFLocalInvocationLayer(PromptModelInvocationLayer):
                 "use_fast",
                 "torch_dtype",
                 "device_map",
+                "generation_kwargs",
+                "model_max_length",
             ]
             if key in kwargs
         }
@@ -78,6 +95,10 @@ class HFLocalInvocationLayer(PromptModelInvocationLayer):
         if "model_kwargs" in model_input_kwargs:
             mkwargs = model_input_kwargs.pop("model_kwargs")
             model_input_kwargs.update(mkwargs)
+
+        # save generation_kwargs for pipeline invocation
+        self.generation_kwargs = model_input_kwargs.pop("generation_kwargs", {})
+        model_max_length = model_input_kwargs.pop("model_max_length", None)
 
         torch_dtype = model_input_kwargs.get("torch_dtype")
         if torch_dtype is not None:
@@ -110,6 +131,19 @@ class HFLocalInvocationLayer(PromptModelInvocationLayer):
         # max_length must be set otherwise HFLocalInvocationLayer._ensure_token_limit will fail.
         self.max_length = max_length or self.pipe.model.config.max_length
 
+        # we allow users to override the tokenizer's model_max_length because models like T5 have relative positional
+        # embeddings and can accept sequences of more than 512 tokens
+        if model_max_length is not None:
+            self.pipe.tokenizer.model_max_length = model_max_length
+
+        if self.max_length > self.pipe.tokenizer.model_max_length:
+            logger.warning(
+                "The max_length %s is greater than model_max_length %s. This might result in truncation of the "
+                "generated text. Please lower the max_length (number of answer tokens) parameter!",
+                self.max_length,
+                self.pipe.tokenizer.model_max_length,
+            )
+
     def invoke(self, *args, **kwargs):
         """
         It takes a prompt and returns a list of generated texts using the local Hugging Face transformers model
@@ -136,9 +170,18 @@ class HFLocalInvocationLayer(PromptModelInvocationLayer):
                     "return_full_text",
                     "clean_up_tokenization_spaces",
                     "truncation",
+                    "generation_kwargs",
                 ]
                 if key in kwargs
             }
+            generation_kwargs = model_input_kwargs.pop("generation_kwargs", self.generation_kwargs)
+            if isinstance(generation_kwargs, dict):
+                model_input_kwargs.update(generation_kwargs)
+            elif isinstance(generation_kwargs, GenerationConfig):
+                gen_dict = generation_kwargs.to_diff_dict()
+                gen_dict.pop("transformers_version", None)
+                model_input_kwargs.update(gen_dict)
+
             is_text_generation = "text-generation" == self.task_name
             # Prefer return_full_text is False for text-generation (unless explicitly set)
             # Thus only generated text is returned (excluding prompt)
@@ -174,9 +217,10 @@ class HFLocalInvocationLayer(PromptModelInvocationLayer):
 
         :param prompt: Prompt text to be sent to the generative model.
         """
+        model_max_length = self.pipe.tokenizer.model_max_length
         n_prompt_tokens = len(self.pipe.tokenizer.tokenize(prompt))
         n_answer_tokens = self.max_length
-        if (n_prompt_tokens + n_answer_tokens) <= self.pipe.tokenizer.model_max_length:
+        if (n_prompt_tokens + n_answer_tokens) <= model_max_length:
             return prompt
 
         logger.warning(
@@ -184,14 +228,14 @@ class HFLocalInvocationLayer(PromptModelInvocationLayer):
             "answer length (%s tokens) fit within the max token limit (%s tokens). "
             "Shorten the prompt to prevent it from being cut off",
             n_prompt_tokens,
-            self.pipe.tokenizer.model_max_length - n_answer_tokens,
+            max(0, model_max_length - n_answer_tokens),
             n_answer_tokens,
-            self.pipe.tokenizer.model_max_length,
+            model_max_length,
         )
 
         tokenized_payload = self.pipe.tokenizer.tokenize(prompt)
         decoded_string = self.pipe.tokenizer.convert_tokens_to_string(
-            tokenized_payload[: self.pipe.tokenizer.model_max_length - n_answer_tokens]
+            tokenized_payload[: model_max_length - n_answer_tokens]
         )
         return decoded_string
 
@@ -203,8 +247,9 @@ class HFLocalInvocationLayer(PromptModelInvocationLayer):
         except RuntimeError:
             # This will fail for all non-HF models
             return False
-
-        return task_name in ["text2text-generation", "text-generation"]
+        # if we are using an api_key it could be HF inference point
+        using_api_key = kwargs.get("api_key", None) is not None
+        return not using_api_key and task_name in ["text2text-generation", "text-generation"]
 
 
 class StopWordsCriteria(StoppingCriteria):
