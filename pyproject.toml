@@ -199,6 +199,7 @@ dev = [
   "typing_extensions; python_version < '3.8'",
   # Test
   "pytest",
+  "pytest-cov",
   "pytest-custom_exit_code",  # used in the CI
   "pytest-asyncio",
   "responses",
@@ -266,7 +267,7 @@ skip_magic_trailing_comma = true  # For compatibility with pydoc>=4.6, check if 
 
 [tool.pylint.'MESSAGES CONTROL']
 max-line-length=120
-load-plugins = "haystack.utils.linting"
+load-plugins = "haystack_linter"
 disable = [
 
   # To keep
